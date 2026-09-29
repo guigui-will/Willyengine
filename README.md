@@ -10,12 +10,16 @@ bitmap 8x8 embutida no próprio binário — não é preciso nenhum arquivo de f
 
 - Janela, loop principal, controle de FPS (`InitWindow`, `WindowShouldClose`, `SetTargetFPS`, `GetFrameTime`)
 - Formas geométricas: retângulo (com cantos arredondados), círculo, linha, triângulo, polígono regular
-- Texto com fonte embutida (`DrawText`, `MeasureText`, `DrawFPS`)
-- Texturas: carregar PNG/JPG/BMP do disco ou gerar em memória (`LoadTexture`, `GenImageColor`, `DrawTexturePro`)
+- Texto com fonte embutida, **incluindo acentos do português** (`DrawText`, `MeasureText`, `DrawFPS`)
+- Quebra automática de linha (`WrapText`, `DrawTextBoxed`)
+- Texturas: carregar PNG/JPG/BMP do disco ou gerar em memória (`LoadTexture`, `GenImageColor`, `DrawTexturePro`), com suporte a **espelhamento (flip)**
+- **Render-to-texture** (`RenderTexture2D`, `BeginTextureMode`/`EndTextureMode`)
+- **Sistema de partículas** (`ParticleEmitter`, `CreateParticleEmitter`, `UpdateParticleEmitter`, `EmitParticleBurst`)
 - `Camera2D` com posição, zoom e rotação (`BeginMode2D` / `EndMode2D`)
-- Teclado e mouse (`IsKeyDown`, `IsKeyPressed`, `IsMouseButtonPressed`, `GetMousePosition`, ...)
-- Áudio: carregar e tocar sons `.wav` (`InitAudioDevice`, `LoadSound`, `PlaySound`)
-- Colisões (AABB, círculo-círculo, círculo-retângulo, ponto-retângulo) e utilitários de `Vector2`
+- Teclado, mouse, **toque (touch)** e **gamepad/controle** (até 4 simultâneos)
+- **Entrada de texto** para caixas de digitação (`StartTextInput`, `GetCharPressed`)
+- Áudio: efeitos curtos via `Sound` (`.wav`) e **música em streaming** via `Music` (`.wav`/`.ogg`/`.mp3`)
+- Colisões (AABB, círculo, ponto) e utilitários de `Vector2`
 - Números aleatórios (`GetRandomValue`)
 
 ## Dependências
@@ -106,19 +110,24 @@ Engine2D/
 ├── src/
 │   └── Engine2D.cpp   # implementação (backend SDL2)
 └── examples/
-    ├── example_basic.cpp           # formas, texto, FPS
-    ├── example_input.cpp           # teclado, mouse, colisão
-    └── example_texture_camera.cpp  # textura procedural, Camera2D, áudio
+    ├── example_basic.cpp            # formas, texto, FPS
+    ├── example_input.cpp            # teclado, mouse, colisão
+    ├── example_texture_camera.cpp   # textura procedural, Camera2D, áudio
+    └── example_advanced.cpp         # partículas, render-to-texture, flip, texto acentuado, gamepad
 ```
 
 ## Notas e limitações conhecidas
 
-- Áudio suporta o formato `.wav` (via SDL2_mixer, que também consegue tocar OGG/MP3 se
-  a distribuição SDL2_mixer tiver esses decoders habilitados).
-- A fonte embutida é uma bitmap 8x8 de baixa resolução (estilo retrô); para texto mais
-  refinado, é possível estender a engine com SDL2_ttf.
-- `DrawTexturePro` não implementa espelhamento (flip) por enquanto; use `source.width`/`height`
-  negativos como próxima extensão, se precisar.
+- Áudio de efeitos (`Sound`) suporta `.wav`; música (`Music`) suporta `.wav`/`.ogg`/`.mp3`
+  dependendo dos decoders com que o SDL2_mixer da sua distro foi compilado. O SDL2_mixer
+  só toca **uma música por vez** (limitação da própria biblioteca) — use vários `Sound`
+  para efeitos simultâneos.
+- A fonte embutida é uma bitmap 8x8 de baixa resolução (estilo retrô), cobrindo ASCII
+  básico + acentos comuns do português; para texto suave em alta resolução ou outros
+  idiomas, é possível estender a engine com SDL2_ttf.
+- Sem sistema de cenas, ECS ou gerenciador de assets — a engine é a camada de
+  desenho/input/áudio (como a própria raylib), você organiza o "jogo" em cima dela.
+- Sem networking e sem sistema de jobs/threads embutido.
 - Testado em Linux (Ubuntu 24.04) com GCC 13. Deve compilar em Windows/macOS sem mudanças,
   desde que as dependências acima estejam instaladas.
 

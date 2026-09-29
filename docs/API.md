@@ -12,10 +12,16 @@
 - [Desenho](#desenho)
 - [Texto](#texto)
 - [Texturas e imagens](#texturas-e-imagens)
+- [Render-to-texture](#render-to-texture)
+- [Partículas](#partículas)
 - [Câmera 2D](#câmera-2d)
 - [Entrada: teclado](#entrada-teclado)
+- [Entrada de texto](#entrada-de-texto)
 - [Entrada: mouse](#entrada-mouse)
+- [Entrada: toque](#entrada-toque)
+- [Entrada: gamepad](#entrada-gamepad)
 - [Áudio](#áudio)
+- [Música em streaming](#música-em-streaming)
 - [Colisões e matemática](#colisões-e-matemática)
 - [Aleatoriedade](#aleatoriedade)
 
@@ -77,9 +83,26 @@ struct Sound { void* handle; bool IsValid() const; };
 ```
 Som curto totalmente carregado em memória (arquivos `.wav`).
 
-### `KeyboardKey` / `MouseButton`
-Enums com os códigos de tecla (ver `include/Keys.hpp`) e botões do mouse
-(`LEFT`, `RIGHT`, `MIDDLE`).
+### `Music`
+```cpp
+struct Music { void* handle; bool IsValid() const; };
+```
+Música em streaming (não carrega tudo em memória de uma vez) — veja [Música em streaming](#música-em-streaming).
+
+### `RenderTexture2D`
+```cpp
+struct RenderTexture2D { void* handle; Texture2D texture; bool IsValid() const; };
+```
+Textura de destino para renderização ("render-to-texture") — veja [Render-to-texture](#render-to-texture).
+
+### `Particle` / `ParticleEmitter`
+Veja a seção [Partículas](#partículas).
+
+### `KeyboardKey` / `MouseButton` / `GamepadButton` / `GamepadAxis`
+Enums com os códigos de tecla (ver `include/Keys.hpp`), botões do mouse
+(`LEFT`, `RIGHT`, `MIDDLE`), botões de gamepad (`A, B, X, Y, LEFT_BUMPER,
+RIGHT_BUMPER, BACK, START, GUIDE, LEFT_THUMB, RIGHT_THUMB, DPAD_UP/DOWN/LEFT/RIGHT`)
+e eixos de gamepad (`LEFT_X, LEFT_Y, RIGHT_X, RIGHT_Y, LEFT_TRIGGER, RIGHT_TRIGGER`).
 
 ---
 
@@ -149,17 +172,26 @@ EndDrawing();
 ## Texto
 
 A engine usa uma **fonte bitmap 8x8 embutida** (sem dependências externas —
-veja `include/Font8x8.hpp`), cobrindo os caracteres ASCII imprimíveis (32–126).
+veja `include/Font8x8.hpp`), cobrindo os caracteres ASCII imprimíveis (32–126)
+**mais as letras acentuadas mais comuns do português** (á à â ã é ê í ó ô õ ú
+ü ç, maiúsculas incluídas, além de ñ/Ñ e alguns símbolos como °, ª, ¿, ¡, €).
+Strings devem estar em **UTF-8** (padrão dos editores/compiladores atuais) —
+a engine decodifica UTF-8 internamente para casar com a tabela de glifos.
 
 | Função | Descrição |
 |---|---|
-| `void DrawText(const std::string& text, int posX, int posY, int fontSize, Color color)` | Desenha texto. `fontSize` é a altura em pixels (a fonte é escalada proporcionalmente a partir da grade 8x8). Suporta `\n` para quebra de linha. |
-| `int MeasureText(const std::string& text, int fontSize)` | Largura em pixels que o texto ocupará — útil para centralizar. |
+| `void DrawText(const std::string& text, int posX, int posY, int fontSize, Color color)` | Desenha texto. `fontSize` é a altura em pixels (a fonte é escalada proporcionalmente a partir da grade 8x8). Suporta `\n` para quebra de linha manual. |
+| `int MeasureText(const std::string& text, int fontSize)` | Largura em pixels que o texto ocupará (da linha mais longa, se houver `\n`) — útil para centralizar. |
 | `void DrawFPS(int posX, int posY)` | Atalho para exibir o FPS atual (verde ≥50, laranja ≥25, vermelho abaixo disso). |
+| `std::vector<std::string> WrapText(const std::string& text, int fontSize, int maxWidth)` | Quebra o texto em linhas que cabem em `maxWidth` pixels, respeitando palavras inteiras. |
+| `void DrawTextBoxed(const std::string& text, Rectangle rec, int fontSize, Color color)` | Desenha texto já quebrado automaticamente para caber dentro de `rec` (não deixa vazar verticalmente). |
 
 > Por ser uma fonte bitmap de baixa resolução (estilo retrô), tamanhos grandes
-> (`fontSize` alto) ficam com aspecto "quadriculado". Para texto suave em alta
-> resolução, considere estender a engine com SDL2_ttf.
+> (`fontSize` alto) ficam com aspecto "quadriculado", e caracteres acentuados
+> ficam mais apertados que as letras simples. Para texto suave em alta
+> resolução, considere estender a engine com SDL2_ttf. Caracteres fora do
+> conjunto suportado (ASCII básico + acentos listados acima) são ignorados
+> (avançam o cursor sem desenhar nada).
 
 ---
 
@@ -174,7 +206,7 @@ veja `include/Font8x8.hpp`), cobrindo os caracteres ASCII imprimíveis (32–126
 | `void DrawTextureV(Texture2D, Vector2 position, Color tint)` | Igual, recebendo `Vector2`. |
 | `void DrawTextureEx(Texture2D, Vector2 position, float rotationDeg, float scale, Color tint)` | Com rotação e escala uniforme. |
 | `void DrawTextureRec(Texture2D, Rectangle source, Vector2 position, Color tint)` | Desenha apenas uma sub-região `source` da textura (útil para spritesheets). |
-| `void DrawTexturePro(Texture2D, Rectangle source, Rectangle dest, Vector2 origin, float rotationDeg, Color tint)` | Controle total: recorte de origem, retângulo de destino, pivô de rotação (`origin`, relativo ao destino) e rotação. |
+| `void DrawTexturePro(Texture2D, Rectangle source, Rectangle dest, Vector2 origin, float rotationDeg, Color tint)` | Controle total: recorte de origem, retângulo de destino, pivô de rotação (`origin`, relativo ao destino) e rotação. **Espelhamento:** passe `source.width` e/ou `source.height` **negativos** para espelhar horizontal/verticalmente. |
 | `Image GenImageColor(int width, int height, Color color)` | Cria uma imagem sólida em memória. |
 | `void ImageDrawPixel(Image& image, int x, int y, Color color)` | Pinta um pixel de uma `Image` (CPU) — útil para gerar texturas proceduralmente (ruído, checkerboards, etc.) antes de subir para a GPU. |
 | `void UnloadImage(Image& image)` | Libera a memória de CPU da imagem (a `Texture2D` gerada a partir dela continua válida). |
@@ -182,6 +214,70 @@ veja `include/Font8x8.hpp`), cobrindo os caracteres ASCII imprimíveis (32–126
 `tint` em branco (`WHITE`) desenha a textura com as cores originais; qualquer
 outra cor multiplica (module) os pixels da textura, e o canal alfa de `tint`
 controla a transparência geral.
+
+---
+
+## Render-to-texture
+
+Permite desenhar em uma textura em vez de desenhar direto na tela — útil para
+pós-processamento, minimapas, composição de camadas, ou "carimbar" algo uma
+vez e reutilizar sem redesenhar todo frame (como no `example_advanced.cpp`).
+
+```cpp
+RenderTexture2D target = LoadRenderTexture(320, 180);
+
+BeginTextureMode(target);
+    ClearBackground(BLANK); // BLANK preserva a transparência
+    DrawCircle(160, 90, 40, RED);
+EndTextureMode();
+
+// mais tarde, em qualquer BeginDrawing()/EndDrawing():
+DrawTexture(target.texture, 0, 0, WHITE);
+
+UnloadRenderTexture(target);
+```
+
+| Função | Descrição |
+|---|---|
+| `RenderTexture2D LoadRenderTexture(int width, int height)` | Cria uma textura de destino de renderização. |
+| `void UnloadRenderTexture(RenderTexture2D target)` | Libera a textura. |
+| `void BeginTextureMode(RenderTexture2D target)` | A partir daqui, todo desenho vai para `target` em vez da tela. |
+| `void EndTextureMode()` | Volta a desenhar na tela normalmente. |
+
+---
+
+## Partículas
+
+Sistema de partículas simples de uso geral (fogo, fumaça, explosões, faíscas...).
+Um `ParticleEmitter` mantém um "pool" fixo de partículas (sem alocação em
+runtime); cor e tamanho são interpolados de `startColor`/`startSize` até
+`endColor`/`endSize` conforme a partícula envelhece.
+
+```cpp
+ParticleEmitter fire = CreateParticleEmitter({ 400.0f, 300.0f }, 300);
+fire.emissionRate = 80.0f;   // partículas/segundo
+fire.particleLife = 1.2f;    // segundos de vida de cada uma
+fire.velocityMin  = { -20.0f, -140.0f };
+fire.velocityMax  = {  20.0f,  -60.0f };
+fire.startColor   = { 255, 220, 60, 255 };
+fire.endColor     = { 200, 30,  0,   0 };
+
+// no loop principal:
+UpdateParticleEmitter(fire, GetFrameTime());
+// dentro de BeginDrawing()/EndDrawing():
+DrawParticleEmitter(fire);
+```
+
+| Função | Descrição |
+|---|---|
+| `ParticleEmitter CreateParticleEmitter(Vector2 position, int maxParticles)` | Cria um emissor com capacidade máxima `maxParticles` (partículas além disso são ignoradas até uma antiga expirar). |
+| `void UpdateParticleEmitter(ParticleEmitter& emitter, float dt)` | Avança a simulação: spawna novas partículas conforme `emissionRate` e atualiza posição/vida das existentes. Chame uma vez por frame. |
+| `void EmitParticleBurst(ParticleEmitter& emitter, int count)` | Dispara `count` partículas de uma vez, independente de `emissionRate` (ótimo para explosões). |
+| `void DrawParticleEmitter(const ParticleEmitter& emitter)` | Desenha todas as partículas ativas (como círculos, cor/tamanho interpolados pela vida restante). |
+
+Os campos de `ParticleEmitter` (`position`, `velocityMin/Max`, `emissionRate`,
+`particleLife`, `startSize`/`endSize`, `startColor`/`endColor`) são públicos e
+podem ser ajustados a qualquer momento, inclusive em tempo real.
 
 ---
 
@@ -220,6 +316,30 @@ etc. — veja a lista completa em `include/Keys.hpp`.
 
 ---
 
+## Entrada de texto
+
+Para caixas de digitação (nome do jogador, chat, etc.), capturando texto já
+decodificado de UTF-8 para Unicode:
+
+```cpp
+StartTextInput();
+std::string nome;
+// a cada frame:
+int c;
+while ((c = GetCharPressed()) != 0) {
+    if (c == 8 && !nome.empty()) nome.pop_back(); // backspace (tratado à parte)
+    else if (c >= 32) nome += (char)c; // simplificado: só ASCII aqui
+}
+```
+
+| Função | Descrição |
+|---|---|
+| `void StartTextInput()` | Ativa a captura de texto (em mobile pode abrir o teclado virtual). |
+| `void StopTextInput()` | Desativa a captura. |
+| `int GetCharPressed()` | Retorna o próximo caractere Unicode digitado desde a última chamada, ou `0` se não houver nenhum — chame em loop a cada frame até esvaziar a fila. |
+
+---
+
 ## Entrada: mouse
 
 | Função | Descrição |
@@ -228,6 +348,41 @@ etc. — veja a lista completa em `include/Keys.hpp`.
 | `Vector2 GetMousePosition()` | Idem, como `Vector2`. |
 | `float GetMouseWheelMove()` | Quantidade de "scroll" desde o último quadro (positivo = para cima). |
 | `bool IsMouseButtonDown/Up/Pressed/Released(MouseButton button)` | Mesma semântica do teclado, para `MouseButton::LEFT / RIGHT / MIDDLE`. |
+
+---
+
+## Entrada: toque
+
+Suporte básico a telas sensíveis ao toque, além do mouse (em desktop normalmente
+fica sempre com `GetTouchPointCount() == 0`).
+
+| Função | Descrição |
+|---|---|
+| `int GetTouchPointCount()` | Número de dedos tocando a tela agora (até 8). |
+| `Vector2 GetTouchPosition(int index)` | Posição do toque de índice `0` a `GetTouchPointCount()-1`. |
+
+---
+
+## Entrada: gamepad
+
+Suporte a até 4 controles simultâneos (Xbox, PlayStation e a maioria dos
+genéricos compatíveis, já remapeados pela SDL2 para um layout lógico único).
+Controles conectados antes ou depois do `InitWindow()` são detectados
+automaticamente.
+
+```cpp
+if (IsGamepadAvailable(0)) {
+    float x = GetGamepadAxisMovement(0, GamepadAxis::LEFT_X);
+    float y = GetGamepadAxisMovement(0, GamepadAxis::LEFT_Y);
+    if (IsGamepadButtonPressed(0, GamepadButton::A)) { /* pular */ }
+}
+```
+
+| Função | Descrição |
+|---|---|
+| `bool IsGamepadAvailable(int gamepad)` | `gamepad`: índice de 0 a 3. |
+| `bool IsGamepadButtonDown/Pressed/Released(int gamepad, GamepadButton button)` | Mesma semântica do teclado/mouse. |
+| `float GetGamepadAxisMovement(int gamepad, GamepadAxis axis)` | Sticks: -1.0 a 1.0 (com pequena zona morta para evitar drift). Gatilhos (`LEFT_TRIGGER`/`RIGHT_TRIGGER`): 0.0 a 1.0. |
 
 ---
 
@@ -246,6 +401,41 @@ etc. — veja a lista completa em `include/Keys.hpp`.
 
 > Sempre verifique `sound.IsValid()` antes de tocar um som que pode não ter
 > sido encontrado no disco — assim seu jogo não quebra por um asset faltando.
+
+---
+
+## Música em streaming
+
+Diferente de `Sound` (que carrega tudo em memória), `Music` toca em streaming
+via SDL2_mixer — ideal para trilhas sonoras longas (`.wav`, `.ogg` ou `.mp3`,
+dependendo dos decoders habilitados na instalação do SDL2_mixer do sistema).
+
+```cpp
+InitAudioDevice();
+Music trilha = LoadMusicStream("trilha.ogg");
+PlayMusicStream(trilha);
+
+while (!WindowShouldClose()) {
+    UpdateMusicStream(trilha); // chame sempre, mesmo que pareça não fazer nada
+    // ...
+}
+
+UnloadMusicStream(trilha);
+```
+
+| Função | Descrição |
+|---|---|
+| `Music LoadMusicStream(const std::string& filePath)` | Carrega (abre) um arquivo de música. |
+| `void UnloadMusicStream(Music music)` | Libera. |
+| `void PlayMusicStream(Music music)` | Toca em loop. |
+| `void UpdateMusicStream(Music music)` | Chame a cada frame (existe por compatibilidade de padrão de uso; o streaming em si já roda internamente no SDL2_mixer). |
+| `void StopMusicStream(Music music)` / `PauseMusicStream` / `ResumeMusicStream` | Controle de reprodução. |
+| `bool IsMusicStreamPlaying(Music music)` | Se está tocando (e não pausada). |
+| `void SetMusicVolume(Music music, float volume)` | Volume de `0.0` a `1.0`. |
+
+> **Limitação:** o SDL2_mixer só reproduz **uma música por vez** (é uma
+> limitação da própria biblioteca, não desta engine) — use `Sound`/`PlaySound`
+> para múltiplos efeitos simultâneos, e `Music` apenas para a trilha de fundo.
 
 ---
 

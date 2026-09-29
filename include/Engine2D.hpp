@@ -95,11 +95,72 @@ struct Sound {
     bool IsValid() const { return handle != nullptr; }
 };
 
+// Música em streaming (não carrega tudo em memória de uma vez; ideal para trilhas
+// sonoras longas). Suporta WAV/OGG/MP3, dependendo dos decoders do SDL2_mixer instalado.
+struct Music {
+    void* handle = nullptr; // Mix_Music*
+    bool IsValid() const { return handle != nullptr; }
+};
+
+// Textura de destino para renderização (permite desenhar em uma textura em vez da
+// tela, útil para pós-processamento, minimapas, "render-to-texture" em geral).
+struct RenderTexture2D {
+    void*     handle = nullptr; // SDL_Texture* com acesso de destino de renderização
+    Texture2D texture;          // a mesma textura, pronta para ser desenhada com DrawTexture*
+    bool IsValid() const { return handle != nullptr; }
+};
+
 enum class KeyboardKey : int; // definido em Keys.hpp (incluído abaixo)
 enum class MouseButton : int {
     LEFT   = 0,
     RIGHT  = 1,
     MIDDLE = 2,
+};
+
+// Botões de um gamepad/controle (convenção estilo Xbox; SDL2 remapeia
+// automaticamente controles de outras marcas para este layout lógico).
+enum class GamepadButton : int {
+    UNKNOWN = -1,
+    A = 0, B, X, Y,
+    LEFT_BUMPER, RIGHT_BUMPER,
+    BACK, START, GUIDE,
+    LEFT_THUMB, RIGHT_THUMB,
+    DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT,
+};
+
+// Eixos analógicos de um gamepad (sticks e gatilhos).
+enum class GamepadAxis : int {
+    LEFT_X = 0, LEFT_Y,
+    RIGHT_X, RIGHT_Y,
+    LEFT_TRIGGER, RIGHT_TRIGGER,
+};
+
+// Uma partícula individual dentro de um ParticleEmitter (ver seção Partículas).
+struct Particle {
+    Vector2 position;
+    Vector2 velocity;
+    float   life     = 0.0f; // segundos restantes de vida
+    float   maxLife  = 1.0f; // vida total (para interpolar cor/tamanho)
+    float   size     = 4.0f;
+    bool    active   = false;
+};
+
+// Emissor de partículas simples: gera partículas continuamente (via
+// UpdateParticleEmitter) e também suporta rajadas manuais (EmitParticleBurst).
+// Cor e tamanho são interpolados de startColor/startSize até endColor/endSize
+// ao longo da vida de cada partícula.
+struct ParticleEmitter {
+    std::vector<Particle> particles;
+    Vector2 position      = { 0.0f, 0.0f };
+    Vector2 velocityMin   = { -50.0f, -50.0f };
+    Vector2 velocityMax   = { 50.0f, 50.0f };
+    float   emissionRate  = 20.0f; // partículas por segundo (0 = só rajadas manuais)
+    float   particleLife  = 1.0f;  // segundos
+    float   startSize     = 6.0f;
+    float   endSize       = 0.0f;
+    Color   startColor    = { 255, 200, 0, 255 };
+    Color   endColor      = { 255, 0, 0, 0 };
+    float   spawnAccumulator = 0.0f; // uso interno
 };
 
 // =====================================================================================
@@ -217,12 +278,22 @@ void DrawPoly(Vector2 center, int sides, float radius, float rotationDeg, Color 
 void DrawPolyLines(Vector2 center, int sides, float radius, float rotationDeg, Color color);
 
 // ---- Texto ---------------------------------------------------------------------------
-// A engine possui uma fonte bitmap 8x8 embutida (sem dependências externas).
-// fontSize é a altura desejada em pixels; a fonte é escalada proporcionalmente.
+// A engine possui uma fonte bitmap 8x8 embutida (sem dependências externas), cobrindo
+// ASCII imprimível (32-126) mais as letras acentuadas mais comuns do português
+// (á à â ã é ê í ó ô õ ú ü ç, maiúsculas incluídas, e ñ/Ñ). As strings devem estar
+// em UTF-8 (padrão do C++/dos editores atuais) — a engine decodifica UTF-8 internamente.
 
 void DrawText(const std::string& text, int posX, int posY, int fontSize, Color color);
 int  MeasureText(const std::string& text, int fontSize); // largura em pixels
 void DrawFPS(int posX, int posY); // atalho para exibir o contador de FPS atual
+
+// Quebra "text" em múltiplas linhas para caber em "maxWidth" pixels (quebra por
+// palavra; uma palavra sozinha maior que maxWidth é cortada por caractere).
+std::vector<std::string> WrapText(const std::string& text, int fontSize, int maxWidth);
+
+// Desenha texto já quebrado automaticamente para caber dentro de "rec" (equivalente
+// a chamar WrapText + várias DrawText em sequência, respeitando rec.height).
+void DrawTextBoxed(const std::string& text, Rectangle rec, int fontSize, Color color);
 
 // ---- Texturas --------------------------------------------------------------------------
 
@@ -235,15 +306,49 @@ void DrawTextureV(Texture2D texture, Vector2 position, Color tint);
 void DrawTextureEx(Texture2D texture, Vector2 position, float rotationDeg, float scale, Color tint);
 // Desenha uma sub-região "source" da textura dentro do retângulo "dest", rotacionando
 // em torno de "origin" (relativo a dest). Equivalente ao DrawTexturePro da raylib.
+// Espelhamento: passe source.width e/ou source.height NEGATIVOS para espelhar
+// horizontal/verticalmente (mesma convenção da raylib).
 void DrawTextureRec(Texture2D texture, Rectangle source, Vector2 position, Color tint);
 void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2 origin,
                      float rotationDeg, Color tint);
+
+// ---- Render-to-texture -------------------------------------------------------------------
+// Permite desenhar em uma textura em vez da tela (pós-processamento, minimapas,
+// composição de camadas, etc.). Uso:
+//
+//   RenderTexture2D target = LoadRenderTexture(320, 180);
+//   ...
+//   BeginTextureMode(target);
+//       ClearBackground(BLANK);
+//       DrawCircle(10, 10, 5, RED);
+//   EndTextureMode();
+//   DrawTexture(target.texture, 0, 0, WHITE); // desenha o resultado na tela
+//   ...
+//   UnloadRenderTexture(target);
+
+RenderTexture2D LoadRenderTexture(int width, int height);
+void            UnloadRenderTexture(RenderTexture2D target);
+void            BeginTextureMode(RenderTexture2D target);
+void            EndTextureMode();
 
 // ---- Imagens (CPU) ---------------------------------------------------------------------
 
 Image GenImageColor(int width, int height, Color color);
 void  ImageDrawPixel(Image& image, int x, int y, Color color);
 void  UnloadImage(Image& image);
+
+// =====================================================================================
+//  PARTÍCULAS
+// =====================================================================================
+// Sistema de partículas simples de uso geral (fogo, fumaça, explosões, faíscas...).
+// Veja a struct ParticleEmitter (seção de tipos) para os parâmetros configuráveis.
+
+ParticleEmitter CreateParticleEmitter(Vector2 position, int maxParticles);
+// Avança a simulação: spawna partículas conforme emissionRate e atualiza as vivas.
+void UpdateParticleEmitter(ParticleEmitter& emitter, float dt);
+// Dispara "count" partículas de uma vez (independente de emissionRate).
+void EmitParticleBurst(ParticleEmitter& emitter, int count);
+void DrawParticleEmitter(const ParticleEmitter& emitter);
 
 // =====================================================================================
 //  ENTRADA: TECLADO
@@ -253,6 +358,16 @@ bool IsKeyPressed(KeyboardKey key);   // true apenas no frame em que foi pressio
 bool IsKeyDown(KeyboardKey key);      // true enquanto estiver segurada
 bool IsKeyReleased(KeyboardKey key);  // true apenas no frame em que foi solta
 bool IsKeyUp(KeyboardKey key);        // true enquanto não estiver pressionada
+
+// ---- Entrada de texto (para caixas de digitação, nome do jogador, chat, etc.) --------
+// Ative com StartTextInput() antes de capturar, e desative com StopTextInput() quando
+// não precisar mais (algumas plataformas mobile abrem o teclado virtual enquanto ativo).
+// Chame GetCharPressed() em loop a cada frame até retornar 0, para pegar todos os
+// caracteres digitados (já decodificados de UTF-8 para code point Unicode).
+
+void StartTextInput();
+void StopTextInput();
+int  GetCharPressed(); // próximo caractere Unicode digitado, ou 0 se não houver nenhum
 
 // =====================================================================================
 //  ENTRADA: MOUSE
@@ -269,6 +384,27 @@ bool IsMouseButtonReleased(MouseButton button);
 bool IsMouseButtonUp(MouseButton button);
 
 // =====================================================================================
+//  ENTRADA: TOQUE (TOUCH)
+// =====================================================================================
+// Suporte básico a telas sensíveis ao toque (além do mouse). Em desktop normalmente
+// fica sempre com GetTouchPointCount() == 0.
+
+int     GetTouchPointCount();
+Vector2 GetTouchPosition(int index); // index de 0 até GetTouchPointCount()-1
+
+// =====================================================================================
+//  ENTRADA: GAMEPAD / CONTROLE
+// =====================================================================================
+// Suporte a até 4 controles simultâneos (Xbox, PlayStation, e a maioria dos genéricos
+// compatíveis, já remapeados pela SDL2 para o layout lógico de GamepadButton/Axis).
+
+bool  IsGamepadAvailable(int gamepad);              // gamepad: índice 0 a 3
+bool  IsGamepadButtonDown(int gamepad, GamepadButton button);
+bool  IsGamepadButtonPressed(int gamepad, GamepadButton button);
+bool  IsGamepadButtonReleased(int gamepad, GamepadButton button);
+float GetGamepadAxisMovement(int gamepad, GamepadAxis axis); // -1.0 a 1.0 (gatilhos: 0.0 a 1.0)
+
+// =====================================================================================
 //  ÁUDIO
 // =====================================================================================
 
@@ -281,6 +417,21 @@ void  UnloadSound(Sound sound);
 void  PlaySound(Sound sound);
 void  StopSound(Sound sound);
 void  SetSoundVolume(Sound sound, float volume); // 0.0f .. 1.0f
+
+// ---- Música em streaming ------------------------------------------------------------
+// Diferente de Sound (que carrega tudo em memória), Music toca em streaming: ideal
+// para trilhas sonoras longas. Chame UpdateMusicStream(music) uma vez por frame
+// enquanto a música estiver tocando (necessário para o streaming avançar).
+
+Music LoadMusicStream(const std::string& filePath); // .wav, .ogg ou .mp3
+void  UnloadMusicStream(Music music);
+void  PlayMusicStream(Music music);
+void  UpdateMusicStream(Music music); // chame a cada frame
+void  StopMusicStream(Music music);
+void  PauseMusicStream(Music music);
+void  ResumeMusicStream(Music music);
+bool  IsMusicStreamPlaying(Music music);
+void  SetMusicVolume(Music music, float volume); // 0.0f .. 1.0f
 
 // =====================================================================================
 //  COLISÕES / MATEMÁTICA AUXILIAR

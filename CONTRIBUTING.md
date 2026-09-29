@@ -17,8 +17,10 @@ Contribuições são bem-vindas! Algumas orientações rápidas:
 
 ## Ideias de extensão
 
-- Suporte a flip horizontal/vertical em `DrawTexturePro` (via `source.width`/`height` negativos).
-- `RenderTexture2D` (renderizar para uma textura, não só para a tela).
-- Sistema de partículas simples.
-- Suporte a joystick/gamepad (SDL2 já oferece a API de base).
-- Fonte TTF opcional via SDL2_ttf, como alternativa à fonte bitmap embutida.
+- Sistema de cenas / gerenciador de estados de jogo (menu, jogando, pausado, game over).
+- Suporte a spritesheets com animação automática (um "AnimatedSprite" pronto).
+- Suporte a joystick genérico além de gamepad (`SDL_Joystick` para controles não mapeados
+  como `SDL_GameController`).
+- Fonte TTF opcional via SDL2_ttf, como alternativa de alta resolução à fonte bitmap embutida.
+- Múltiplas músicas simultâneas (o SDL2_mixer só toca uma por vez nativamente — precisaria
+  de um mixer próprio por cima do `Mix_Chunk`).

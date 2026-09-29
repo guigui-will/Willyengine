@@ -12,7 +12,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
+#include <deque>
 #include <unordered_map>
 
 namespace Engine2D {
@@ -63,6 +65,26 @@ struct State {
     int  mouseX = 0;
     int  mouseY = 0;
     float mouseWheel = 0.0f;
+
+    // ---- Toque ----
+    static constexpr int MAX_TOUCH_POINTS = 8;
+    struct TouchPoint { SDL_FingerID id; float x, y; bool active; };
+    std::vector<TouchPoint> touchPoints;
+
+    // ---- Entrada de texto ----
+    std::deque<unsigned int> textInputQueue;
+    bool textInputActive = false;
+
+    // ---- Gamepad ----
+    static constexpr int MAX_GAMEPADS = 4;
+    SDL_GameController* gamepads[MAX_GAMEPADS] = { nullptr, nullptr, nullptr, nullptr };
+    static constexpr int MAX_GAMEPAD_BUTTONS = SDL_CONTROLLER_BUTTON_MAX;
+    bool gamepadButtonCurrent[MAX_GAMEPADS][MAX_GAMEPAD_BUTTONS]  = {};
+    bool gamepadButtonPrevious[MAX_GAMEPADS][MAX_GAMEPAD_BUTTONS] = {};
+
+    // ---- Render target (para BeginTextureMode/EndTextureMode) ----
+    SDL_Texture* previousRenderTarget = nullptr;
+    bool         renderingToTexture   = false;
 
     // ---- Câmera 2D ----
     bool     cameraActive = false;
@@ -175,7 +197,7 @@ using namespace internal;
 // =====================================================================================
 
 bool InitWindow(int width, int height, const std::string& title) {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_EVENTS) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER) != 0) {
         std::fprintf(stderr, "Engine2D: falha ao iniciar SDL: %s\n", SDL_GetError());
         return false;
     }
@@ -227,12 +249,25 @@ bool InitWindow(int width, int height, const std::string& title) {
     std::fill(std::begin(S.mouseCurrent), std::end(S.mouseCurrent), false);
     std::fill(std::begin(S.mousePrevious), std::end(S.mousePrevious), false);
 
+    // Abre até MAX_GAMEPADS controles já conectados no momento do InitWindow.
+    // Controles plugados depois são detectados via evento em PollEvents().
+    int slot = 0;
+    for (int i = 0; i < SDL_NumJoysticks() && slot < State::MAX_GAMEPADS; i++) {
+        if (SDL_IsGameController(i)) {
+            SDL_GameController* pad = SDL_GameControllerOpen(i);
+            if (pad) S.gamepads[slot++] = pad;
+        }
+    }
+
     return true;
 }
 
 void CloseWindow() {
     if (S.audioReady) {
         CloseAudioDevice();
+    }
+    for (int i = 0; i < State::MAX_GAMEPADS; i++) {
+        if (S.gamepads[i]) { SDL_GameControllerClose(S.gamepads[i]); S.gamepads[i] = nullptr; }
     }
     if (S.renderer) { SDL_DestroyRenderer(S.renderer); S.renderer = nullptr; }
     if (S.window)   { SDL_DestroyWindow(S.window);     S.window   = nullptr; }
@@ -244,6 +279,10 @@ static void PollEvents() {
     // Copia estado atual para "anterior" antes de processar novos eventos.
     std::copy(std::begin(S.keyCurrent), std::end(S.keyCurrent), std::begin(S.keyPrevious));
     std::copy(std::begin(S.mouseCurrent), std::end(S.mouseCurrent), std::begin(S.mousePrevious));
+    for (int g = 0; g < State::MAX_GAMEPADS; g++) {
+        std::copy(std::begin(S.gamepadButtonCurrent[g]), std::end(S.gamepadButtonCurrent[g]),
+                   std::begin(S.gamepadButtonPrevious[g]));
+    }
     S.mouseWheel = 0.0f;
 
     SDL_Event ev;
@@ -260,6 +299,22 @@ static void PollEvents() {
             case SDL_KEYUP: {
                 int k = ScancodeToEngineKey(ev.key.keysym.scancode);
                 if (k >= 0 && k < State::MAX_KEYS) S.keyCurrent[k] = false;
+                break;
+            }
+            case SDL_TEXTINPUT: {
+                // ev.text.text é uma string UTF-8 curta (geralmente 1 caractere).
+                const char* s = ev.text.text;
+                size_t i = 0, len = std::strlen(s);
+                while (i < len) {
+                    unsigned char c = (unsigned char)s[i];
+                    unsigned int cp = c;
+                    size_t adv = 1;
+                    if ((c & 0xE0) == 0xC0 && i + 1 < len) { cp = (c & 0x1Fu) << 6 | ((unsigned char)s[i+1] & 0x3Fu); adv = 2; }
+                    else if ((c & 0xF0) == 0xE0 && i + 2 < len) { cp = (c & 0x0Fu) << 12 | ((unsigned char)s[i+1] & 0x3Fu) << 6 | ((unsigned char)s[i+2] & 0x3Fu); adv = 3; }
+                    else if ((c & 0xF8) == 0xF0 && i + 3 < len) { cp = (c & 0x07u) << 18 | ((unsigned char)s[i+1] & 0x3Fu) << 12 | ((unsigned char)s[i+2] & 0x3Fu) << 6 | ((unsigned char)s[i+3] & 0x3Fu); adv = 4; }
+                    S.textInputQueue.push_back(cp);
+                    i += adv;
+                }
                 break;
             }
             case SDL_MOUSEBUTTONDOWN: {
@@ -279,6 +334,52 @@ static void PollEvents() {
             case SDL_MOUSEWHEEL:
                 S.mouseWheel += static_cast<float>(ev.wheel.y);
                 break;
+            case SDL_CONTROLLERDEVICEADDED: {
+                for (int slot = 0; slot < State::MAX_GAMEPADS; slot++) {
+                    if (!S.gamepads[slot]) {
+                        SDL_GameController* pad = SDL_GameControllerOpen(ev.cdevice.which);
+                        if (pad) S.gamepads[slot] = pad;
+                        break;
+                    }
+                }
+                break;
+            }
+            case SDL_CONTROLLERDEVICEREMOVED: {
+                for (int slot = 0; slot < State::MAX_GAMEPADS; slot++) {
+                    if (S.gamepads[slot]) {
+                        SDL_Joystick* joy = SDL_GameControllerGetJoystick(S.gamepads[slot]);
+                        if (joy && SDL_JoystickInstanceID(joy) == ev.cdevice.which) {
+                            SDL_GameControllerClose(S.gamepads[slot]);
+                            S.gamepads[slot] = nullptr;
+                        }
+                    }
+                }
+                break;
+            }
+            case SDL_FINGERDOWN:
+            case SDL_FINGERMOTION: {
+                bool found = false;
+                for (auto& tp : S.touchPoints) {
+                    if (tp.id == ev.tfinger.fingerId) {
+                        tp.x = ev.tfinger.x * S.screenWidth;
+                        tp.y = ev.tfinger.y * S.screenHeight;
+                        tp.active = true;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found && S.touchPoints.size() < State::MAX_TOUCH_POINTS) {
+                    S.touchPoints.push_back({ ev.tfinger.fingerId, ev.tfinger.x * S.screenWidth,
+                                               ev.tfinger.y * S.screenHeight, true });
+                }
+                break;
+            }
+            case SDL_FINGERUP: {
+                for (auto it = S.touchPoints.begin(); it != S.touchPoints.end(); ++it) {
+                    if (it->id == ev.tfinger.fingerId) { S.touchPoints.erase(it); break; }
+                }
+                break;
+            }
             case SDL_WINDOWEVENT:
                 if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                     S.screenWidth  = ev.window.data1;
@@ -286,6 +387,15 @@ static void PollEvents() {
                 }
                 break;
             default: break;
+        }
+    }
+
+    // Estado dos botões de gamepad é lido diretamente (mais simples e confiável
+    // que rastrear eventos SDL_CONTROLLERBUTTONDOWN/UP um a um).
+    for (int g = 0; g < State::MAX_GAMEPADS; g++) {
+        if (!S.gamepads[g]) continue;
+        for (int b = 0; b < State::MAX_GAMEPAD_BUTTONS; b++) {
+            S.gamepadButtonCurrent[g][b] = SDL_GameControllerGetButton(S.gamepads[g], (SDL_GameControllerButton)b) != 0;
         }
     }
 
@@ -587,9 +697,41 @@ void DrawPolyLines(Vector2 center, int sides, float radius, float rotationDeg, C
 
 // ---- Texto (fonte bitmap 8x8 embutida) ------------------------------------------------
 
+// Decodifica o próximo code point Unicode a partir de uma string UTF-8, avançando "i".
+static unsigned int NextCodepoint(const std::string& text, size_t& i) {
+    unsigned char c = (unsigned char)text[i];
+    if (c < 0x80) { i += 1; return c; }
+    if ((c & 0xE0) == 0xC0 && i + 1 < text.size()) {
+        unsigned int cp = (c & 0x1Fu) << 6 | ((unsigned char)text[i+1] & 0x3Fu);
+        i += 2; return cp;
+    }
+    if ((c & 0xF0) == 0xE0 && i + 2 < text.size()) {
+        unsigned int cp = (c & 0x0Fu) << 12 | ((unsigned char)text[i+1] & 0x3Fu) << 6 | ((unsigned char)text[i+2] & 0x3Fu);
+        i += 3; return cp;
+    }
+    if ((c & 0xF8) == 0xF0 && i + 3 < text.size()) {
+        unsigned int cp = (c & 0x07u) << 18 | ((unsigned char)text[i+1] & 0x3Fu) << 12 |
+                          ((unsigned char)text[i+2] & 0x3Fu) << 6 | ((unsigned char)text[i+3] & 0x3Fu);
+        i += 4; return cp;
+    }
+    i += 1;
+    return c; // byte inválido isolado: trata como está, apenas para não travar
+}
+
+// Conta quantos "caracteres" (code points) uma string UTF-8 tem — usado para medir texto.
 int MeasureText(const std::string& text, int fontSize) {
     float scale = (float)fontSize / (float)internal::FONT8x8_GLYPH_SIZE;
-    return (int)std::round(text.size() * internal::FONT8x8_GLYPH_SIZE * scale);
+    // Mede por linha (caso haja '\n') e retorna a largura da linha mais longa.
+    int maxWidth = 0;
+    int lineCount = 0;
+    size_t i = 0;
+    while (i < text.size()) {
+        unsigned int cp = NextCodepoint(text, i);
+        if (cp == '\n') { maxWidth = std::max(maxWidth, lineCount); lineCount = 0; continue; }
+        lineCount++;
+    }
+    maxWidth = std::max(maxWidth, lineCount);
+    return (int)std::round(maxWidth * internal::FONT8x8_GLYPH_SIZE * scale);
 }
 
 void DrawText(const std::string& text, int posX, int posY, int fontSize, Color color) {
@@ -600,14 +742,16 @@ void DrawText(const std::string& text, int posX, int posY, int fontSize, Color c
     SDL_SetRenderDrawColor(S.renderer, color.r, color.g, color.b, color.a);
 
     int cursorX = posX;
-    for (unsigned char ch : text) {
-        if (ch == '\n') { posY += fontSize + 2; cursorX = posX; continue; }
-        int idx = (int)ch - internal::FONT8x8_FIRST_CHAR;
-        if (idx < 0 || idx >= (internal::FONT8x8_LAST_CHAR - internal::FONT8x8_FIRST_CHAR + 1)) {
-            cursorX += fontSize; // caractere fora do intervalo suportado: apenas avança
+    size_t i = 0;
+    while (i < text.size()) {
+        unsigned int cp = NextCodepoint(text, i);
+        if (cp == '\n') { posY += fontSize + 2; cursorX = posX; continue; }
+
+        const unsigned char* glyph = internal::FindGlyph(cp);
+        if (!glyph) {
+            cursorX += (int)std::round(glyphSize * scale); // não suportado: apenas avança
             continue;
         }
-        const unsigned char* glyph = internal::FONT8x8[idx];
         for (int row = 0; row < glyphSize; row++) {
             unsigned char bits = glyph[row];
             for (int col = 0; col < glyphSize; col++) {
@@ -629,6 +773,66 @@ void DrawFPS(int posX, int posY) {
     std::string text = "FPS: " + std::to_string(GetFPS());
     Color color = (S.currentFPS >= 50) ? LIME : (S.currentFPS >= 25 ? ORANGE : RED);
     DrawText(text, posX, posY, 20, color);
+}
+
+std::vector<std::string> WrapText(const std::string& text, int fontSize, int maxWidth) {
+    std::vector<std::string> lines;
+    std::string currentLine;
+    std::string currentWord;
+
+    auto flushWord = [&](bool forceNewLineIfNeeded) {
+        if (currentWord.empty()) return;
+        std::string candidate = currentLine.empty() ? currentWord : currentLine + " " + currentWord;
+        if (MeasureText(candidate, fontSize) <= maxWidth || currentLine.empty()) {
+            // Se nem a palavra sozinha cabe, ainda assim a colocamos (evita loop infinito);
+            // o caso realmente maior que maxWidth é raro para palavras normais.
+            currentLine = candidate;
+        } else {
+            lines.push_back(currentLine);
+            currentLine = currentWord;
+        }
+        currentWord.clear();
+        (void)forceNewLineIfNeeded;
+    };
+
+    size_t i = 0;
+    while (i < text.size()) {
+        unsigned int cp = NextCodepoint(text, i);
+        if (cp == '\n') {
+            flushWord(true);
+            lines.push_back(currentLine);
+            currentLine.clear();
+        } else if (cp == ' ') {
+            flushWord(false);
+        } else {
+            // Reencodifica o code point de volta para UTF-8 e acumula na palavra atual.
+            if (cp < 0x80) {
+                currentWord += (char)cp;
+            } else if (cp < 0x800) {
+                currentWord += (char)(0xC0 | (cp >> 6));
+                currentWord += (char)(0x80 | (cp & 0x3F));
+            } else {
+                currentWord += (char)(0xE0 | (cp >> 12));
+                currentWord += (char)(0x80 | ((cp >> 6) & 0x3F));
+                currentWord += (char)(0x80 | (cp & 0x3F));
+            }
+        }
+    }
+    flushWord(false);
+    if (!currentLine.empty() || lines.empty()) lines.push_back(currentLine);
+
+    return lines;
+}
+
+void DrawTextBoxed(const std::string& text, Rectangle rec, int fontSize, Color color) {
+    std::vector<std::string> lines = WrapText(text, fontSize, (int)rec.width);
+    int lineHeight = fontSize + 2;
+    int y = (int)rec.y;
+    for (const auto& line : lines) {
+        if (y + lineHeight > rec.y + rec.height) break; // não deixa vazar do retângulo
+        DrawText(line, (int)rec.x, y, fontSize, color);
+        y += lineHeight;
+    }
 }
 
 // ---- Texturas ---------------------------------------------------------------------------
@@ -709,6 +913,11 @@ void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2
     SDL_SetTextureColorMod(sdlTex, tint.r, tint.g, tint.b);
     SDL_SetTextureAlphaMod(sdlTex, tint.a);
 
+    // source.width/height negativos = espelhar horizontal/verticalmente (convenção raylib).
+    SDL_RendererFlip flip = SDL_FLIP_NONE;
+    if (source.width < 0)  { flip = (SDL_RendererFlip)(flip | SDL_FLIP_HORIZONTAL); source.width  = -source.width; }
+    if (source.height < 0) { flip = (SDL_RendererFlip)(flip | SDL_FLIP_VERTICAL);   source.height = -source.height; }
+
     SDL_Rect srcRect{ (int)source.x, (int)source.y, (int)source.width, (int)source.height };
 
     Vector2 screenPos = WorldToScreen({ dest.x, dest.y });
@@ -722,7 +931,45 @@ void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2
 
     double totalRotation = rotationDeg + (S.cameraActive ? S.activeCamera.rotation : 0.0f);
 
-    SDL_RenderCopyExF(S.renderer, sdlTex, &srcRect, &dstRect, totalRotation, &center, SDL_FLIP_NONE);
+    SDL_RenderCopyExF(S.renderer, sdlTex, &srcRect, &dstRect, totalRotation, &center, flip);
+}
+
+// ---- Render-to-texture -------------------------------------------------------------------
+
+RenderTexture2D LoadRenderTexture(int width, int height) {
+    RenderTexture2D target;
+    if (width <= 0 || height <= 0) return target;
+
+    SDL_Texture* tex = SDL_CreateTexture(S.renderer, SDL_PIXELFORMAT_RGBA8888,
+                                          SDL_TEXTUREACCESS_TARGET, width, height);
+    if (!tex) {
+        std::fprintf(stderr, "Engine2D: falha ao criar render texture: %s\n", SDL_GetError());
+        return target;
+    }
+    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+
+    target.handle = tex;
+    target.texture.handle = tex;
+    target.texture.width  = width;
+    target.texture.height = height;
+    return target;
+}
+
+void UnloadRenderTexture(RenderTexture2D target) {
+    if (target.handle) SDL_DestroyTexture(reinterpret_cast<SDL_Texture*>(target.handle));
+}
+
+void BeginTextureMode(RenderTexture2D target) {
+    if (!target.IsValid()) return;
+    S.previousRenderTarget = SDL_GetRenderTarget(S.renderer);
+    SDL_SetRenderTarget(S.renderer, reinterpret_cast<SDL_Texture*>(target.handle));
+    S.renderingToTexture = true;
+}
+
+void EndTextureMode() {
+    SDL_SetRenderTarget(S.renderer, S.previousRenderTarget);
+    S.renderingToTexture = false;
+    S.previousRenderTarget = nullptr;
 }
 
 // ---- Imagens (CPU) ----------------------------------------------------------------------
@@ -757,6 +1004,72 @@ void UnloadImage(Image& image) {
 }
 
 // =====================================================================================
+//  PARTÍCULAS
+// =====================================================================================
+
+ParticleEmitter CreateParticleEmitter(Vector2 position, int maxParticles) {
+    ParticleEmitter emitter;
+    emitter.position = position;
+    emitter.particles.resize(std::max(1, maxParticles));
+    return emitter;
+}
+
+static void SpawnOneParticle(ParticleEmitter& emitter) {
+    // Reutiliza o primeiro slot inativo (pool de objetos, sem alocação em runtime).
+    for (auto& p : emitter.particles) {
+        if (!p.active) {
+            p.position = emitter.position;
+            float vx = emitter.velocityMin.x + (emitter.velocityMax.x - emitter.velocityMin.x) *
+                       (GetRandomValue(0, 1000) / 1000.0f);
+            float vy = emitter.velocityMin.y + (emitter.velocityMax.y - emitter.velocityMin.y) *
+                       (GetRandomValue(0, 1000) / 1000.0f);
+            p.velocity = { vx, vy };
+            p.maxLife  = emitter.particleLife;
+            p.life     = emitter.particleLife;
+            p.size     = emitter.startSize;
+            p.active   = true;
+            return;
+        }
+    }
+    // pool cheio: nenhuma partícula nova é criada até uma existente expirar
+}
+
+void EmitParticleBurst(ParticleEmitter& emitter, int count) {
+    for (int i = 0; i < count; i++) SpawnOneParticle(emitter);
+}
+
+void UpdateParticleEmitter(ParticleEmitter& emitter, float dt) {
+    if (emitter.emissionRate > 0.0f) {
+        emitter.spawnAccumulator += dt * emitter.emissionRate;
+        while (emitter.spawnAccumulator >= 1.0f) {
+            SpawnOneParticle(emitter);
+            emitter.spawnAccumulator -= 1.0f;
+        }
+    }
+
+    for (auto& p : emitter.particles) {
+        if (!p.active) continue;
+        p.life -= dt;
+        if (p.life <= 0.0f) { p.active = false; continue; }
+        p.position = p.position + p.velocity * dt;
+    }
+}
+
+void DrawParticleEmitter(const ParticleEmitter& emitter) {
+    for (const auto& p : emitter.particles) {
+        if (!p.active) continue;
+        float t = 1.0f - std::clamp(p.life / std::max(0.0001f, p.maxLife), 0.0f, 1.0f); // 0=nasceu, 1=vai morrer
+        Color c;
+        c.r = (unsigned char)std::round(emitter.startColor.r + (emitter.endColor.r - emitter.startColor.r) * t);
+        c.g = (unsigned char)std::round(emitter.startColor.g + (emitter.endColor.g - emitter.startColor.g) * t);
+        c.b = (unsigned char)std::round(emitter.startColor.b + (emitter.endColor.b - emitter.startColor.b) * t);
+        c.a = (unsigned char)std::round(emitter.startColor.a + (emitter.endColor.a - emitter.startColor.a) * t);
+        float size = emitter.startSize + (emitter.endSize - emitter.startSize) * t;
+        if (size > 0.0f) DrawCircleV(p.position, size, c);
+    }
+}
+
+// =====================================================================================
 //  ENTRADA: TECLADO
 // =====================================================================================
 
@@ -779,6 +1092,25 @@ bool IsKeyReleased(KeyboardKey key) {
     int k = KeyIndex(key);
     if (k < 0 || k >= State::MAX_KEYS) return false;
     return !S.keyCurrent[k] && S.keyPrevious[k];
+}
+
+// ---- Entrada de texto -----------------------------------------------------------------
+
+void StartTextInput() {
+    SDL_StartTextInput();
+    S.textInputActive = true;
+}
+
+void StopTextInput() {
+    SDL_StopTextInput();
+    S.textInputActive = false;
+}
+
+int GetCharPressed() {
+    if (S.textInputQueue.empty()) return 0;
+    unsigned int cp = S.textInputQueue.front();
+    S.textInputQueue.pop_front();
+    return (int)cp;
 }
 
 // =====================================================================================
@@ -808,6 +1140,68 @@ bool IsMouseButtonReleased(MouseButton button) {
     int b = MouseIndex(button);
     if (b < 0 || b >= State::MAX_MOUSE_BUTTONS) return false;
     return !S.mouseCurrent[b] && S.mousePrevious[b];
+}
+
+// =====================================================================================
+//  ENTRADA: TOQUE
+// =====================================================================================
+
+int GetTouchPointCount() { return (int)S.touchPoints.size(); }
+
+Vector2 GetTouchPosition(int index) {
+    if (index < 0 || index >= (int)S.touchPoints.size()) return { 0.0f, 0.0f };
+    return { S.touchPoints[index].x, S.touchPoints[index].y };
+}
+
+// =====================================================================================
+//  ENTRADA: GAMEPAD
+// =====================================================================================
+
+bool IsGamepadAvailable(int gamepad) {
+    return gamepad >= 0 && gamepad < State::MAX_GAMEPADS && S.gamepads[gamepad] != nullptr;
+}
+
+bool IsGamepadButtonDown(int gamepad, GamepadButton button) {
+    if (!IsGamepadAvailable(gamepad)) return false;
+    int b = (int)button;
+    if (b < 0 || b >= State::MAX_GAMEPAD_BUTTONS) return false;
+    return S.gamepadButtonCurrent[gamepad][b];
+}
+
+bool IsGamepadButtonPressed(int gamepad, GamepadButton button) {
+    if (!IsGamepadAvailable(gamepad)) return false;
+    int b = (int)button;
+    if (b < 0 || b >= State::MAX_GAMEPAD_BUTTONS) return false;
+    return S.gamepadButtonCurrent[gamepad][b] && !S.gamepadButtonPrevious[gamepad][b];
+}
+
+bool IsGamepadButtonReleased(int gamepad, GamepadButton button) {
+    if (!IsGamepadAvailable(gamepad)) return false;
+    int b = (int)button;
+    if (b < 0 || b >= State::MAX_GAMEPAD_BUTTONS) return false;
+    return !S.gamepadButtonCurrent[gamepad][b] && S.gamepadButtonPrevious[gamepad][b];
+}
+
+float GetGamepadAxisMovement(int gamepad, GamepadAxis axis) {
+    if (!IsGamepadAvailable(gamepad)) return 0.0f;
+    SDL_GameControllerAxis sdlAxis;
+    switch (axis) {
+        case GamepadAxis::LEFT_X:        sdlAxis = SDL_CONTROLLER_AXIS_LEFTX; break;
+        case GamepadAxis::LEFT_Y:        sdlAxis = SDL_CONTROLLER_AXIS_LEFTY; break;
+        case GamepadAxis::RIGHT_X:       sdlAxis = SDL_CONTROLLER_AXIS_RIGHTX; break;
+        case GamepadAxis::RIGHT_Y:       sdlAxis = SDL_CONTROLLER_AXIS_RIGHTY; break;
+        case GamepadAxis::LEFT_TRIGGER:  sdlAxis = SDL_CONTROLLER_AXIS_TRIGGERLEFT; break;
+        case GamepadAxis::RIGHT_TRIGGER: sdlAxis = SDL_CONTROLLER_AXIS_TRIGGERRIGHT; break;
+        default: return 0.0f;
+    }
+    Sint16 raw = SDL_GameControllerGetAxis(S.gamepads[gamepad], sdlAxis);
+    float value = raw / 32767.0f;
+    // Pequena zona morta para evitar "drift" de analógicos baratos.
+    if (axis == GamepadAxis::LEFT_X || axis == GamepadAxis::LEFT_Y ||
+        axis == GamepadAxis::RIGHT_X || axis == GamepadAxis::RIGHT_Y) {
+        if (std::fabs(value) < 0.1f) value = 0.0f;
+    }
+    return std::clamp(value, -1.0f, 1.0f);
 }
 
 // =====================================================================================
@@ -875,6 +1269,59 @@ void SetSoundVolume(Sound sound, float volume) {
     SoundData* data = reinterpret_cast<SoundData*>(sound.handle);
     int vol = (int)(std::clamp(volume, 0.0f, 1.0f) * MIX_MAX_VOLUME);
     Mix_VolumeChunk(data->chunk, vol);
+}
+
+// ---- Música em streaming ----------------------------------------------------------------
+
+Music LoadMusicStream(const std::string& filePath) {
+    Music music;
+    if (!S.audioReady) {
+        std::fprintf(stderr, "Engine2D: InitAudioDevice() não foi chamado antes de LoadMusicStream.\n");
+        return music;
+    }
+    Mix_Music* mus = Mix_LoadMUS(filePath.c_str());
+    if (!mus) {
+        std::fprintf(stderr, "Engine2D: falha ao carregar música '%s': %s\n", filePath.c_str(), Mix_GetError());
+        return music;
+    }
+    music.handle = mus;
+    return music;
+}
+
+void UnloadMusicStream(Music music) {
+    if (music.handle) Mix_FreeMusic(reinterpret_cast<Mix_Music*>(music.handle));
+}
+
+void PlayMusicStream(Music music) {
+    if (!music.handle) return;
+    Mix_PlayMusic(reinterpret_cast<Mix_Music*>(music.handle), -1); // -1 = repete indefinidamente
+}
+
+void UpdateMusicStream(Music /*music*/) {
+    // O SDL2_mixer já cuida do streaming em uma thread de áudio interna; esta função
+    // existe por compatibilidade com o padrão de uso da raylib (chamar a cada frame)
+    // e como ponto de extensão futuro (crossfade, efeitos, etc.).
+}
+
+void StopMusicStream(Music /*music*/) {
+    Mix_HaltMusic();
+}
+
+void PauseMusicStream(Music /*music*/) {
+    Mix_PauseMusic();
+}
+
+void ResumeMusicStream(Music /*music*/) {
+    Mix_ResumeMusic();
+}
+
+bool IsMusicStreamPlaying(Music music) {
+    if (!music.handle) return false;
+    return Mix_PlayingMusic() != 0 && Mix_PausedMusic() == 0;
+}
+
+void SetMusicVolume(Music /*music*/, float volume) {
+    Mix_VolumeMusic((int)(std::clamp(volume, 0.0f, 1.0f) * MIX_MAX_VOLUME));
 }
 
 // =====================================================================================
